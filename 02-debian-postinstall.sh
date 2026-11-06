@@ -24,8 +24,9 @@
 #   12. UFW firewall (deny in / allow out + KDE Connect, Syncthing, Tailscale, libvirt)
 #   13. apt-listbugs
 #
-# Intentionally NOT installed: firmware-intel-graphics and extra Mesa/VA-API
-# packages. Installing them froze boot (white dash) twice on sid.
+# Intentionally NOT installed: firmware-intel-graphics. Installing it froze
+# boot (white dash) twice on sid. The installer adds i915.enable_guc=0 so the
+# iGPU works without it; Mesa (userspace only) goes in with KDE in step 3.
 #
 # Logs: ~/debian-postinstall.log
 # =============================================================================
@@ -230,11 +231,26 @@ if yesno "Step 3: install minimal KDE Plasma?" y; then
     systemsettings kscreen powerdevil              # settings, displays, power
     xdg-desktop-portal-kde polkit-kde-agent-1      # file pickers, admin prompts
     breeze fonts-noto-core                         # theme, fonts
+    libgl1-mesa-dri libegl-mesa0 libglx-mesa0      # Mesa OpenGL/EGL (userspace only)
+    mesa-vulkan-drivers
+    kwalletmanager libpam-kwallet5                 # wallet unlocks at SDDM login (no Brave prompts)
   )
   apt_install_norec "${KDE_PKGS[@]}"
   sudo systemctl enable sddm.service
   sudo systemctl set-default graphical.target
   ok "Plasma installed; SDDM starts on next boot"
+
+  # KDE Wallet auto-unlock: pam_kwallet5 opens 'kdewallet' with your login
+  # password at SDDM, so Brave and other apps don't prompt for it.
+  if grep -q 'pam_kwallet5' /etc/pam.d/sddm 2>/dev/null; then
+    ok "pam_kwallet5 is in SDDM's PAM stack (wallet unlocks at login)"
+  elif [[ -f /etc/pam.d/sddm ]]; then
+    warn "Adding pam_kwallet5 to /etc/pam.d/sddm"
+    sudo sed -i '/^@include common-auth/a -auth   optional        pam_kwallet5.so' /etc/pam.d/sddm
+    sudo sed -i '/^@include common-session/a -session optional        pam_kwallet5.so auto_start' /etc/pam.d/sddm
+    grep -q 'pam_kwallet5' /etc/pam.d/sddm && ok "pam_kwallet5 added to SDDM" \
+      || warn "Couldn't add pam_kwallet5; check /etc/pam.d/sddm"
+  fi
 
   if yesno "  Also install the KDE extras (Dolphin plugins, Gwenview, Spectacle, KDE Connect, Discover)?" y; then
     KDE_EXTRAS=(
@@ -266,7 +282,7 @@ if yesno "Step 4: install core utilities and printing?" y; then
     man-db manpages
     wget git rclone rsync
     unzip zip 7zip
-    htop btop tree jq
+    htop btop tree jq fastfetch
     fonts-terminus fonts-terminus-otb   # Terminus for Konsole too
 
     # Printing
@@ -604,11 +620,14 @@ chk() { local d=$1; shift; if "$@" &>/dev/null; then ok "$d"; else warn "FAIL: $
 chk "Root is the @ subvolume"            bash -c "findmnt -no SOURCE / | grep -q '\[/@\]'"
 chk "Keyfile in current initramfs"       bash -c "sudo lsinitramfs /boot/initrd.img-\$(uname -r) | grep -qE 'cryptroot/keyfiles/.+\\.key'"
 chk "No firmware-intel-graphics installed" bash -c "! dpkg -s firmware-intel-graphics"
+chk "i915.enable_guc=0 on kernel cmdline" grep -q 'i915.enable_guc=0' /proc/cmdline
+chk "Intel GPU not wedged"               bash -c "! sudo dmesg | grep -qi 'declaring it wedged'"
 have snapper  && chk "Snapper config '$SNAPPER_CFG'"       sudo snapper -c "$SNAPPER_CFG" get-config
 have snapper  && chk "grub-btrfsd running"                 systemctl is-active grub-btrfsd
 dpkg -s sddm &>/dev/null && chk "SDDM enabled"             systemctl is-enabled sddm
 have virsh    && chk "libvirtd active"                     systemctl is-active libvirtd
 [[ -f /etc/modprobe.d/vfio.conf ]] && chk "vfio.conf present" test -s /etc/modprobe.d/vfio.conf
+dpkg -s sddm &>/dev/null && chk "KDE Wallet unlocks at login (pam_kwallet5)" grep -q pam_kwallet5 /etc/pam.d/sddm
 have ufw      && chk "UFW active"                          bash -c "sudo ufw status | grep -q 'Status: active'"
 ((FAILS)) && warn "$FAILS check(s) failed; see above and $LOG" || ok "All checks passed"
 
@@ -639,6 +658,12 @@ ok "Post-install complete."
 cat <<'EOF'
 
 Next steps:
+  * Graphics: in Plasma, check the renderer says "Mesa Intel" (not llvmpipe):
+      qdbus6 org.kde.KWin /KWin supportInformation | grep -i renderer
+  * KDE Wallet: let the first app create the wallet named 'kdewallet', type
+    Blowfish (not GPG), password = your LOGIN password. It then opens
+    automatically at every SDDM login. (Doesn't work with autologin; if you
+    change your login password, change the wallet's in KWallet Manager too.)
   * Reboot: SDDM starts, group changes (libvirt, kvm, lpadmin) take effect,
     hugepages and vfio-pci binding apply.
   * After reboot:

@@ -23,7 +23,8 @@
 #
 # Intentionally NOT installed here: firmware-intel-graphics / Mesa extras.
 # Adding them froze boot (white dash) twice on sid. The base firmware below
-# is the set that is known to boot.
+# is the set that is known to boot; i915.enable_guc=0 on the kernel command
+# line lets the iGPU work without the GuC firmware (see KERNEL_CMDLINE).
 #
 # After the reboot, log in on the TTY, connect with 'nmtui', then run
 # 02-debian-postinstall.sh as your normal user.
@@ -42,7 +43,11 @@ PBKDF_ITER_MS=1500          # keeps GRUB's (slow) PBKDF2 unlock to a few seconds
 BTRFS_OPTS=noatime,compress=zstd:1,space_cache=v2
 CONSOLE_FONTFACE=Terminus
 CONSOLE_FONTSIZE=16x32
-KERNEL_CMDLINE="intel_iommu=on iommu=pt"   # no 'quiet' so you can see where boot stops
+# i915.enable_guc=0: without firmware-intel-graphics, the sid kernel's i915
+# can't load GuC firmware and declares the iGPU "wedged" (llvmpipe + flicker).
+# Turning GuC off lets the UHD 770 run fully on the base firmware.
+# No 'quiet' so you can see where boot stops.
+KERNEL_CMDLINE="intel_iommu=on iommu=pt i915.enable_guc=0"
 LOG=/root/01-debian-install.log
 
 # Subvolume -> mountpoint (order matters: @ first)
@@ -145,6 +150,7 @@ run_checks() {
   check "ESP grub.cfg unlocks LUKS (cryptomount)" grep -q cryptomount "$MNT/boot/efi/EFI/debian/grub.cfg"
   check "GRUB_ENABLE_CRYPTODISK=y set"           grep -q '^GRUB_ENABLE_CRYPTODISK=y' "$MNT/etc/default/grub"
   check "Kernel cmdline has intel_iommu=on"      grep -q 'intel_iommu=on' "$MNT/boot/grub/grub.cfg"
+  check "Kernel cmdline has i915.enable_guc=0"   grep -q 'i915.enable_guc=0' "$MNT/boot/grub/grub.cfg"
   check "GRUB root is the @ subvolume"           grep -q 'rootflags=subvol=@' "$MNT/boot/grub/grub.cfg"
   check "/etc/crypttab uses the keyfile"         grep -q '/etc/keys/root.key' "$MNT/etc/crypttab"
   check "Keyfile exists and is 0400"             bash -c "[[ \$(stat -c %a '$MNT/etc/keys/root.key') == 400 ]]"

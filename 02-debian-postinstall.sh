@@ -253,27 +253,16 @@ if yesno "Step 3: install minimal KDE Plasma?" y; then
       || warn "Couldn't add pam_kwallet5; check /etc/pam.d/sddm"
   fi
 
-  # SSH agent + KDE Wallet: one ssh-agent per session, ksshaskpass supplies
-  # the key passphrase from the wallet, key loaded at login. Type the
-  # passphrase once (tick "Remember password"), never again.
-  info "Setting up ssh-agent with KDE Wallet"
-  mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/environment.d" \
-           "$HOME/.config/autostart" "$HOME/.ssh"
+  # SSH agent + KDE Wallet. Debian's openssh-client already provides a
+  # per-session agent (ssh-agent.socket -> $XDG_RUNTIME_DIR/openssh_agent),
+  # so we only add: ksshaskpass for the passphrase (stored in KDE Wallet)
+  # and an autostart that loads the key at login. Don't create a custom
+  # ssh-agent.service: it shadows Debian's and every ssh/git call hangs.
+  info "Setting up SSH key unlock via KDE Wallet"
+  mkdir -p "$HOME/.config/environment.d" "$HOME/.config/autostart" "$HOME/.ssh"
   chmod 700 "$HOME/.ssh"
-  cat > "$HOME/.config/systemd/user/ssh-agent.service" <<'EOF'
-[Unit]
-Description=SSH key agent
-
-[Service]
-Type=simple
-Environment=SSH_AUTH_SOCK=%t/ssh-agent.socket
-ExecStart=/usr/bin/ssh-agent -D -a $SSH_AUTH_SOCK
-
-[Install]
-WantedBy=default.target
-EOF
+  rm -f "$HOME/.config/systemd/user/ssh-agent.service"   # remove any old custom unit
   cat > "$HOME/.config/environment.d/ssh.conf" <<'EOF'
-SSH_AUTH_SOCK=${XDG_RUNTIME_DIR}/ssh-agent.socket
 SSH_ASKPASS=/usr/bin/ksshaskpass
 SSH_ASKPASS_REQUIRE=prefer
 EOF
@@ -289,9 +278,9 @@ EOF
   fi
   chmod 600 "$HOME/.ssh/config"
   systemctl --user daemon-reload 2>/dev/null || true
-  systemctl --user enable ssh-agent.service 2>/dev/null \
-    && ok "ssh-agent enabled for your session" \
-    || warn "Enable after logging in to Plasma: systemctl --user enable --now ssh-agent"
+  systemctl --user enable ssh-agent.socket 2>/dev/null \
+    && ok "Debian's ssh-agent.socket enabled; key passphrase comes from KDE Wallet" \
+    || warn "After logging in to Plasma, check: systemctl --user status ssh-agent.socket"
 
   if yesno "  Also install the KDE extras (Dolphin plugins, Gwenview, Spectacle, KDE Connect, Discover)?" y; then
     KDE_EXTRAS=(
@@ -669,7 +658,7 @@ dpkg -s sddm &>/dev/null && chk "SDDM enabled"             systemctl is-enabled 
 have virsh    && chk "libvirtd active"                     systemctl is-active libvirtd
 [[ -f /etc/modprobe.d/vfio.conf ]] && chk "vfio.conf present" test -s /etc/modprobe.d/vfio.conf
 dpkg -s sddm &>/dev/null && chk "KDE Wallet unlocks at login (pam_kwallet5)" grep -q pam_kwallet5 /etc/pam.d/sddm
-[[ -f $HOME/.config/systemd/user/ssh-agent.service ]] && chk "ssh-agent user service enabled" systemctl --user is-enabled ssh-agent
+[[ -f $HOME/.config/autostart/ssh-add.desktop ]] && chk "No custom ssh-agent.service shadowing Debian's" test ! -e "$HOME/.config/systemd/user/ssh-agent.service"
 have ufw      && chk "UFW active"                          bash -c "sudo ufw status | grep -q 'Status: active'"
 ((FAILS)) && warn "$FAILS check(s) failed; see above and $LOG" || ok "All checks passed"
 

@@ -234,6 +234,7 @@ if yesno "Step 3: install minimal KDE Plasma?" y; then
     libgl1-mesa-dri libegl-mesa0 libglx-mesa0      # Mesa OpenGL/EGL (userspace only)
     mesa-vulkan-drivers
     kwalletmanager libpam-kwallet5                 # wallet unlocks at SDDM login (no Brave prompts)
+    ksshaskpass openssh-client                     # SSH key passphrase from KDE Wallet
   )
   apt_install_norec "${KDE_PKGS[@]}"
   sudo systemctl enable sddm.service
@@ -251,6 +252,46 @@ if yesno "Step 3: install minimal KDE Plasma?" y; then
     grep -q 'pam_kwallet5' /etc/pam.d/sddm && ok "pam_kwallet5 added to SDDM" \
       || warn "Couldn't add pam_kwallet5; check /etc/pam.d/sddm"
   fi
+
+  # SSH agent + KDE Wallet: one ssh-agent per session, ksshaskpass supplies
+  # the key passphrase from the wallet, key loaded at login. Type the
+  # passphrase once (tick "Remember password"), never again.
+  info "Setting up ssh-agent with KDE Wallet"
+  mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/environment.d" \
+           "$HOME/.config/autostart" "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+  cat > "$HOME/.config/systemd/user/ssh-agent.service" <<'EOF'
+[Unit]
+Description=SSH key agent
+
+[Service]
+Type=simple
+Environment=SSH_AUTH_SOCK=%t/ssh-agent.socket
+ExecStart=/usr/bin/ssh-agent -D -a $SSH_AUTH_SOCK
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$HOME/.config/environment.d/ssh.conf" <<'EOF'
+SSH_AUTH_SOCK=${XDG_RUNTIME_DIR}/ssh-agent.socket
+SSH_ASKPASS=/usr/bin/ksshaskpass
+SSH_ASKPASS_REQUIRE=prefer
+EOF
+  cat > "$HOME/.config/autostart/ssh-add.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=SSH key (from KDE Wallet)
+Exec=sh -c 'ssh-add -q < /dev/null'
+X-KDE-autostart-phase=2
+EOF
+  if ! grep -qs AddKeysToAgent "$HOME/.ssh/config"; then
+    printf 'Host *\n    AddKeysToAgent yes\n' >> "$HOME/.ssh/config"
+  fi
+  chmod 600 "$HOME/.ssh/config"
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user enable ssh-agent.service 2>/dev/null \
+    && ok "ssh-agent enabled for your session" \
+    || warn "Enable after logging in to Plasma: systemctl --user enable --now ssh-agent"
 
   if yesno "  Also install the KDE extras (Dolphin plugins, Gwenview, Spectacle, KDE Connect, Discover)?" y; then
     KDE_EXTRAS=(
@@ -628,6 +669,7 @@ dpkg -s sddm &>/dev/null && chk "SDDM enabled"             systemctl is-enabled 
 have virsh    && chk "libvirtd active"                     systemctl is-active libvirtd
 [[ -f /etc/modprobe.d/vfio.conf ]] && chk "vfio.conf present" test -s /etc/modprobe.d/vfio.conf
 dpkg -s sddm &>/dev/null && chk "KDE Wallet unlocks at login (pam_kwallet5)" grep -q pam_kwallet5 /etc/pam.d/sddm
+[[ -f $HOME/.config/systemd/user/ssh-agent.service ]] && chk "ssh-agent user service enabled" systemctl --user is-enabled ssh-agent
 have ufw      && chk "UFW active"                          bash -c "sudo ufw status | grep -q 'Status: active'"
 ((FAILS)) && warn "$FAILS check(s) failed; see above and $LOG" || ok "All checks passed"
 
@@ -664,6 +706,9 @@ Next steps:
     Blowfish (not GPG), password = your LOGIN password. It then opens
     automatically at every SDDM login. (Doesn't work with autologin; if you
     change your login password, change the wallet's in KWallet Manager too.)
+  * SSH keys: if you have one (~/.ssh/id_ed25519), the first Plasma login
+    asks for its passphrase. Tick "Remember password"; after that the key
+    loads silently every login. Check with: ssh-add -l
   * Reboot: SDDM starts, group changes (libvirt, kvm, lpadmin) take effect,
     hugepages and vfio-pci binding apply.
   * After reboot:

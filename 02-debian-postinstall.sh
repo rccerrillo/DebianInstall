@@ -232,6 +232,8 @@ if yesno "Step 3: install minimal KDE Plasma?" y; then
     plasma-pa pipewire-audio wireplumber           # sound + volume applet
     konsole dolphin                                # terminal, file manager
     systemsettings kscreen powerdevil              # settings, displays, power
+    power-profiles-daemon                          # Power Save / Balanced / Performance modes
+    kde-config-screenlocker kscreenlocker-dev      # Screen Locking page in System Settings
     xdg-desktop-portal-kde polkit-kde-agent-1      # file pickers, admin prompts
     breeze fonts-noto-core                         # theme, fonts
     libgl1-mesa-dri libegl-mesa0 libglx-mesa0      # Mesa OpenGL/EGL (userspace only)

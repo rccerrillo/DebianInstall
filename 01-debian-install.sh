@@ -21,10 +21,11 @@
 #        @var_cache       -> /var/cache
 #        @libvirt_images  -> /var/lib/libvirt/images  (chattr +C, no CoW)
 #
-# Intentionally NOT installed here: firmware-intel-graphics / Mesa extras.
-# Adding them froze boot (white dash) twice on sid. The base firmware below
-# is the set that is known to boot; i915.enable_guc=0 on the kernel command
-# line lets the iGPU work without the GuC firmware (see KERNEL_CMDLINE).
+# Intel graphics: this script installs only the base firmware, and boots with
+# i915.enable_guc=0 so the iGPU works without firmware-intel-graphics.
+# 02-debian-postinstall.sh step 3b then installs firmware-intel-graphics on
+# its own (behind a snapshot) and can turn GuC back on. Installing it together
+# with the VA-API driver froze boot (white dash) twice, so they stay separate.
 #
 # After the reboot, log in on the TTY, connect with 'nmtui', then run
 # 02-debian-postinstall.sh as your normal user.
@@ -45,7 +46,7 @@ CONSOLE_FONTFACE=Terminus
 CONSOLE_FONTSIZE=16x32
 # i915.enable_guc=0: without firmware-intel-graphics, the sid kernel's i915
 # can't load GuC firmware and declares the iGPU "wedged" (llvmpipe + flicker).
-# Turning GuC off lets the UHD 770 run fully on the base firmware.
+# Turning GuC off keeps first boot working; post-install step 3b can remove it.
 # No 'quiet' so you can see where boot stops.
 KERNEL_CMDLINE="intel_iommu=on iommu=pt i915.enable_guc=0"
 LOG=/root/01-debian-install.log
@@ -398,7 +399,7 @@ grep -q '^UMASK=0077' /etc/initramfs-tools/initramfs.conf \
   || echo 'UMASK=0077' >> /etc/initramfs-tools/initramfs.conf
 
 # Kernel, base firmware, microcode, GRUB + shim (Secure Boot)
-# NOTE: no firmware-intel-graphics / extra Mesa here (froze boot on sid).
+# NOTE: firmware-intel-graphics is added later by post-install step 3b.
 apt-get install -y linux-image-amd64 firmware-linux intel-microcode \
   grub-efi-amd64 grub-efi-amd64-signed shim-signed efibootmgr
 

@@ -13,6 +13,7 @@
 #    1. System update
 #    2. Snapper + grub-btrfs (snapshots in the GRUB menu) + Btrfs Assistant GUI
 #    3. Minimal KDE Plasma (+ optional extras)
+#   3b. Intel graphics firmware (+ optional: turn GuC back on)
 #    4. Core utilities + printing
 #    5. Network tools
 #    6. Sync & VPN: Syncthing, Tailscale, Mullvad
@@ -24,9 +25,11 @@
 #   12. UFW firewall (deny in / allow out + KDE Connect, Syncthing, Tailscale, libvirt)
 #   13. apt-listbugs
 #
-# Intentionally NOT installed: firmware-intel-graphics. Installing it froze
-# boot (white dash) twice on sid. The installer adds i915.enable_guc=0 so the
-# iGPU works without it; Mesa (userspace only) goes in with KDE in step 3.
+# Intel graphics: the installer boots with i915.enable_guc=0 so the iGPU works
+# without extra firmware. Mesa goes in with KDE (step 3). Step 3b installs
+# firmware-intel-graphics ON ITS OWN, behind a snapshot. It's proven to work
+# on this hardware, with or without GuC. NOT installed: intel-media-va-driver-non-free,
+# a suspect in the two earlier white-dash boot freezes.
 #
 # Logs: ~/debian-postinstall.log
 # =============================================================================
@@ -298,6 +301,33 @@ EOF
     )
     apt_install_norec "${KDE_EXTRAS[@]}"
     ok "KDE extras installed"
+  fi
+fi
+
+# =============================================================================
+# 3b. Intel graphics firmware (DMC, GuC, HuC) + optional GuC enable
+# =============================================================================
+if yesno "Step 3b: install the Intel graphics firmware (firmware-intel-graphics)?" y; then
+  snap "pre-intel-firmware"
+  info "Installing firmware-intel-graphics (on its own)"
+  apt_install firmware-intel-graphics
+  rebuild_initramfs
+  ok "Intel firmware installed. With i915.enable_guc=0 still set, the DMC"
+  ok "firmware loads after reboot (display power management)."
+
+  if grep -q 'i915.enable_guc=0' /etc/default/grub; then
+    warn "GuC is currently disabled (i915.enable_guc=0)."
+    warn "With the firmware in place GuC worked on this hardware, but if the next"
+    warn "boot hangs at a white dash: GRUB -> snapshots -> 'pre-enable-guc'."
+    if yesno "  Turn GuC back on (remove i915.enable_guc=0)?" n; then
+      snap "pre-enable-guc"
+      sudo sed -i 's/ i915.enable_guc=0//' /etc/default/grub
+      sudo update-grub
+      ok "GuC enabled from next boot. Check after reboot: sudo dmesg | grep -i guc"
+    else
+      ok "Keeping i915.enable_guc=0 (safe default). To test GuC once: at GRUB press 'e',"
+      ok "delete i915.enable_guc=0 from the 'linux' line, Ctrl+X."
+    fi
   fi
 fi
 
@@ -649,8 +679,7 @@ FAILS=0
 chk() { local d=$1; shift; if "$@" &>/dev/null; then ok "$d"; else warn "FAIL: $d"; FAILS=$((FAILS+1)); fi; }
 chk "Root is the @ subvolume"            bash -c "findmnt -no SOURCE / | grep -q '\[/@\]'"
 chk "Keyfile in current initramfs"       bash -c "sudo lsinitramfs /boot/initrd.img-\$(uname -r) | grep -qE 'cryptroot/keyfiles/.+\\.key'"
-chk "No firmware-intel-graphics installed" bash -c "! dpkg -s firmware-intel-graphics"
-chk "i915.enable_guc=0 on kernel cmdline" grep -q 'i915.enable_guc=0' /proc/cmdline
+dpkg -s firmware-intel-graphics &>/dev/null && chk "firmware-intel-graphics in initramfs" bash -c "sudo lsinitramfs /boot/initrd.img-\$(uname -r) | grep -q 'i915/.*dmc'"
 chk "Intel GPU not wedged"               bash -c "! sudo dmesg | grep -qi 'declaring it wedged'"
 have snapper  && chk "Snapper config '$SNAPPER_CFG'"       sudo snapper -c "$SNAPPER_CFG" get-config
 have snapper  && chk "grub-btrfsd running"                 systemctl is-active grub-btrfsd
@@ -691,6 +720,9 @@ cat <<'EOF'
 Next steps:
   * Graphics: in Plasma, check the renderer says "Mesa Intel" (not llvmpipe):
       qdbus6 org.kde.KWin /KWin supportInformation | grep -i renderer
+    and that the firmware loaded:  sudo dmesg | grep -iE 'dmc|guc'
+    If boot hangs at a white dash: GRUB -> snapshots -> "pre-intel-firmware",
+    then restore it with Btrfs Assistant.
   * KDE Wallet: let the first app create the wallet named 'kdewallet', type
     Blowfish (not GPG), password = your LOGIN password. It then opens
     automatically at every SDDM login. (Doesn't work with autologin; if you

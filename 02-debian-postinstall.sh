@@ -11,7 +11,7 @@
 # from the GRUB snapshot menu.
 #
 #    1. System update
-#    2. Snapper + grub-btrfs (snapshots in the GRUB menu)
+#    2. Snapper + grub-btrfs (snapshots in the GRUB menu) + Btrfs Assistant GUI
 #    3. Minimal KDE Plasma (+ optional extras)
 #    4. Core utilities + printing
 #    5. Network tools
@@ -161,8 +161,8 @@ fi
 # 2. Snapper + grub-btrfs
 # =============================================================================
 if yesno "Step 2: set up Snapper and grub-btrfs (snapshots in the GRUB menu)?" y; then
-  info "Installing Snapper"
-  apt_install snapper btrfs-progs
+  info "Installing Snapper and Btrfs Assistant"
+  apt_install snapper btrfs-progs btrfs-assistant   # btrfs-assistant: Qt GUI for Snapper/subvolumes
 
   if ! sudo snapper -c "$SNAPPER_CFG" get-config &>/dev/null; then
     # snapper create-config insists on creating its own nested .snapshots
@@ -715,7 +715,8 @@ Next steps:
   * Samba:       server disabled; edit /etc/samba/smb.conf, then
                  sudo systemctl enable --now smbd
   * Backups:     restic or Borg for data; Snapper covers system rollback.
-  * Rollback:    boot a snapshot from GRUB, then follow the doc's section 5.
+  * Rollback:    boot a snapshot from GRUB to test it, then make it permanent
+                 with Btrfs Assistant (Snapper tab -> Restore) or the doc's section 5.
 
 Note: Mullvad and Tailscale can conflict over routing/DNS when both are
 connected. Mullvad's "Local network sharing" may be needed for VM <-> LAN.

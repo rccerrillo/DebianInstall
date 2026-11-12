@@ -38,6 +38,11 @@ set -euo pipefail
 MNT=/mnt
 MAPPER=cryptroot
 SUITE=sid
+# sid is sometimes mid-transition (e.g. new perl, liblocale-gettext-perl not
+# rebuilt yet) and then debootstrap or apt can't install base packages. So the
+# system is bootstrapped AND fully installed from stable, then moved to sid at
+# the end of the chroot with an upgrade that never removes packages.
+BOOTSTRAP_SUITE=trixie
 MIRROR=http://deb.debian.org/debian
 ESP_SIZE=1G
 PBKDF_ITER_MS=1500          # keeps GRUB's (slow) PBKDF2 unlock to a few seconds
@@ -168,6 +173,7 @@ run_checks() {
   check "Persistent journal dir exists"          test -d "$MNT/var/log/journal"
   check "Console font is $CONSOLE_FONTFACE $CONSOLE_FONTSIZE" \
         grep -q "FONTSIZE=\"$CONSOLE_FONTSIZE\"" "$MNT/etc/default/console-setup"
+  check "Wi-Fi firmware installed (firmware-iwlwifi)" bash -c "chroot '$MNT' dpkg -s firmware-iwlwifi"
   check "zram swap configured"                   grep -q '^ALGO=zstd' "$MNT/etc/default/zramswap"
   check "UEFI boot entry points at shim"         bash -c "efibootmgr -v | grep -qi shimx64"
   check "apt suite is $SUITE"                    grep -q "Suites: $SUITE" "$MNT/etc/apt/sources.list.d/debian.sources"
@@ -253,6 +259,7 @@ cmd_install() {
   info "Step 2: Checking LUKS2 support in Debian's signed GRUB"
   local LUKS_TYPE=luks1 tmpd
   tmpd=$(mktemp -d)
+  chmod 755 "$tmpd"     # apt downloads as the _apt user
   if (cd "$tmpd" && apt-get download grub-efi-amd64-signed >/dev/null 2>&1 \
         && dpkg-deb -x grub-efi-amd64-signed_*.deb g \
         && strings g/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed | grep -qi luks2); then
@@ -305,11 +312,12 @@ cmd_install() {
   # ---------------------------------------------------------------------------
   # 4. Debootstrap sid + fstab
   # ---------------------------------------------------------------------------
-  info "Step 4: debootstrap $SUITE (takes a few minutes)"
-  debootstrap --arch=amd64 "$SUITE" "$MNT" "$MIRROR"
+  info "Step 4: debootstrap $BOOTSTRAP_SUITE (upgraded to $SUITE in the chroot)"
+  rm -rf "${MNT:?}"/debootstrap
+  debootstrap --arch=amd64 "$BOOTSTRAP_SUITE" "$MNT" "$MIRROR"
   genfstab -U "$MNT" >> "$MNT/etc/fstab"
   sed -i 's/subvolid=[0-9]*,//; s/,subvolid=[0-9]*//' "$MNT/etc/fstab"
-  ok "Base system installed, fstab written (subvol= names only)"
+  ok "Base system ($BOOTSTRAP_SUITE) installed, fstab written (subvol= names only)"
 
   # ---------------------------------------------------------------------------
   # 5. Keyfile so the passphrase is typed once (created from the live side,
@@ -346,16 +354,23 @@ ok() { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 echo "$HOST" > /etc/hostname
 printf '127.0.0.1 localhost\n127.0.1.1 %s\n\n::1 localhost ip6-localhost ip6-loopback\n' "$HOST" > /etc/hosts
 
-# apt sources: sid, all components (firmware lives in non-free-firmware)
-rm -f /etc/apt/sources.list
-cat > /etc/apt/sources.list.d/debian.sources <<EOF
+# apt sources. Everything below is installed from STABLE first (always
+# consistent), and the system is moved to sid at the very end, with an
+# upgrade that never removes packages. That way a sid transition in progress
+# (e.g. a new perl that liblocale-gettext-perl isn't rebuilt for yet) can't
+# break the install; held-back packages just upgrade later.
+write_sources() {
+  rm -f /etc/apt/sources.list
+  cat > /etc/apt/sources.list.d/debian.sources <<EOF
 Types: deb
 URIs: $MIRROR
-Suites: $SUITE
+Suites: $1
 Components: main contrib non-free non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
-apt-get update
+  apt-get update
+}
+write_sources "$BOOTSTRAP_SUITE"
 
 # Pre-answer debconf so nothing pops up a dialog
 debconf-set-selections <<EOF
@@ -401,6 +416,7 @@ grep -q '^UMASK=0077' /etc/initramfs-tools/initramfs.conf \
 # Kernel, base firmware, microcode, GRUB + shim (Secure Boot)
 # NOTE: firmware-intel-graphics is added later by post-install step 3b.
 apt-get install -y linux-image-amd64 firmware-linux intel-microcode \
+  firmware-iwlwifi firmware-realtek firmware-atheros wireless-regdb iw \
   grub-efi-amd64 grub-efi-amd64-signed shim-signed efibootmgr
 
 grep -q '^GRUB_ENABLE_CRYPTODISK=' /etc/default/grub \
@@ -431,11 +447,33 @@ echo "Set the login password for $USERNAME:"
 until passwd "$USERNAME"; do echo "Try again."; done
 passwd -l root >/dev/null
 ok "User $USERNAME created (sudo); root login locked"
+
+# ---- Move to sid, safely ---------------------------------------------------
+APTO=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+write_sources "$SUITE"
+# 1) upgrade everything that can move WITHOUT removing anything (new kernel incl.)
+apt-get "${APTO[@]}" upgrade --with-new-pkgs
+# 2) full-upgrade only if it wouldn't remove packages
+if apt-get -s full-upgrade | grep -q '^Remv'; then
+  echo "  -> sid is mid-transition; holding back (would remove):"
+  apt-get -s full-upgrade | awk '/^Remv/ {print "       " $2}'
+  echo "  -> Run 'sudo apt full-upgrade' after first boot, once sid settles."
+else
+  apt-get "${APTO[@]}" full-upgrade
+fi
+ok "System moved to $SUITE"
+
+# Re-run boot pieces after the upgrade (new kernel / GRUB packages)
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck
+update-initramfs -u -k all
+update-grub
+ok "GRUB and initramfs refreshed for the $SUITE kernel"
 CHROOT
   chmod 700 "$MNT/root/chroot-setup.sh"
 
   arch-chroot "$MNT" /usr/bin/env \
     HOST="$HOST" USERNAME="$USERNAME" TZONE="$TZONE" SUITE="$SUITE" MIRROR="$MIRROR" \
+    BOOTSTRAP_SUITE="$BOOTSTRAP_SUITE" \
     FONTFACE="$CONSOLE_FONTFACE" FONTSIZE="$CONSOLE_FONTSIZE" CMDLINE="$KERNEL_CMDLINE" \
     bash /root/chroot-setup.sh
   rm -f "$MNT/root/chroot-setup.sh"

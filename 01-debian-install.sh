@@ -176,6 +176,7 @@ run_checks() {
   check "Wi-Fi firmware installed (firmware-iwlwifi)" bash -c "chroot '$MNT' dpkg -s firmware-iwlwifi"
   check "zram swap configured"                   grep -q '^ALGO=zstd' "$MNT/etc/default/zramswap"
   check "UEFI boot entry points at shim"         bash -c "efibootmgr -v | grep -qi shimx64"
+  check "forky fallback source pinned at 100"    grep -q 'Pin-Priority: 100' "$MNT/etc/apt/preferences.d/forky-fallback"
   check "apt suite is $SUITE"                    grep -q "Suites: $SUITE" "$MNT/etc/apt/sources.list.d/debian.sources"
   echo
   if ((FAILS)); then
@@ -451,6 +452,22 @@ ok "User $USERNAME created (sudo); root login locked"
 # ---- Move to sid, safely ---------------------------------------------------
 APTO=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 write_sources "$SUITE"
+# testing (forky) as a low-priority fallback: sid stays the default (500),
+# forky is used only on request (-t forky) when sid is mid-transition.
+cat > /etc/apt/sources.list.d/forky.sources <<EOF
+Types: deb
+URIs: $MIRROR
+Suites: forky
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+cat > /etc/apt/preferences.d/forky-fallback <<'EOF'
+# sid stays the default (500); forky is only used when asked for (-t forky)
+Package: *
+Pin: release n=forky
+Pin-Priority: 100
+EOF
+apt-get update
 # 1) upgrade everything that can move WITHOUT removing anything (new kernel incl.)
 apt-get "${APTO[@]}" upgrade --with-new-pkgs
 # 2) full-upgrade only if it wouldn't remove packages
@@ -458,6 +475,7 @@ if apt-get -s full-upgrade | grep -q '^Remv'; then
   echo "  -> sid is mid-transition; holding back (would remove):"
   apt-get -s full-upgrade | awk '/^Remv/ {print "       " $2}'
   echo "  -> Run 'sudo apt full-upgrade' after first boot, once sid settles."
+  echo "     (Check what's still held with: apt list --upgradable)"
 else
   apt-get "${APTO[@]}" full-upgrade
 fi

@@ -84,29 +84,37 @@ retry() {
 
 # Install only packages that exist in the repos, so one renamed package
 # doesn't abort the whole transaction (sid renames things).
-apt_install() {
-  local avail=() missing=() p
+# When sid is mid-transition (e.g. a new perl whose rebuilt packages haven't
+# landed yet), installs fail with "Unable to satisfy dependencies". Then we
+# retry the same packages from testing (forky), which only accepts packages
+# that install cleanly. forky is pinned at 100, so sid stays the default and
+# a later full-upgrade moves everything forward.
+install_pkgs() {   # install_pkgs [--no-install-recommends] pkg...
+  local opts=() avail=() missing=() p
+  [[ ${1:-} == --no-install-recommends ]] && { opts+=("$1"); shift; }
   for p in "$@"; do
     if apt-cache show "$p" &>/dev/null; then avail+=("$p"); else missing+=("$p"); fi
   done
   ((${#missing[@]})) && warn "Not in the repos, skipping: ${missing[*]}"
-  if ((${#avail[@]})); then
-    wait_net
-    retry "${APT[@]}" install "${avail[@]}"
+  ((${#avail[@]})) || return 0
+  wait_net
+  if "${APT[@]}" install "${opts[@]}" "${avail[@]}"; then
+    return 0
   fi
-}
-
-apt_install_norec() {
-  local avail=() missing=() p
-  for p in "$@"; do
-    if apt-cache show "$p" &>/dev/null; then avail+=("$p"); else missing+=("$p"); fi
-  done
-  ((${#missing[@]})) && warn "Not in the repos, skipping: ${missing[*]}"
-  if ((${#avail[@]})); then
-    wait_net
-    retry "${APT[@]}" install --no-install-recommends "${avail[@]}"
+  if ! apt-cache policy | grep -q 'n=forky'; then
+    warn "Install failed and no forky fallback source is configured."
+    return 1
   fi
+  warn "sid can't satisfy these right now (likely a transition); trying testing (forky)"
+  if sudo apt-get -s -t forky install "${opts[@]}" "${avail[@]}" | grep -q '^Remv'; then
+    warn "forky would REMOVE packages; not doing that automatically:"
+    sudo apt-get -s -t forky install "${opts[@]}" "${avail[@]}" | awk '/^Remv/ {print "      " $2}'
+    return 1
+  fi
+  retry "${APT[@]}" -t forky install "${opts[@]}" "${avail[@]}"
 }
+apt_install()       { install_pkgs "$@"; }
+apt_install_norec() { install_pkgs --no-install-recommends "$@"; }
 
 # Snapshot before a step (no-op until Snapper is set up in step 2)
 snap() {
@@ -146,6 +154,23 @@ wait_net
 # 1. System update
 # =============================================================================
 info "Step 1: Updating the system"
+# testing (forky) as a low-priority fallback for when sid is mid-transition
+if [[ ! -f /etc/apt/sources.list.d/forky.sources ]]; then
+  sudo tee /etc/apt/sources.list.d/forky.sources >/dev/null <<'EOF'
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: forky
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+  sudo tee /etc/apt/preferences.d/forky-fallback >/dev/null <<'EOF'
+# sid stays the default (500); forky is only used when asked for (-t forky)
+Package: *
+Pin: release n=forky
+Pin-Priority: 100
+EOF
+  ok "Added testing (forky) as a pinned fallback source"
+fi
 retry sudo apt-get update
 retry "${APT[@]}" upgrade --with-new-pkgs
 # full-upgrade only if it removes nothing (sid transitions can propose removals)
@@ -757,6 +782,12 @@ Next steps:
   * Samba:       server disabled; edit /etc/samba/smb.conf, then
                  sudo systemctl enable --now smbd
   * Backups:     restic or Borg for data; Snapper covers system rollback.
+  * sid transitions: when sid is mid-update (e.g. a new perl), installs fall
+    back to testing (forky) automatically and full-upgrade holds back anything
+    it would remove. To catch up later, a few days on:
+      apt list --upgradable          # what's waiting
+      sudo apt full-upgrade          # read the summary; say No if it removes things you need
+    forky is pinned at 100, so normal upgrades always prefer sid.
   * Rollback:    boot a snapshot from GRUB to test it, then make it permanent
                  with Btrfs Assistant (Snapper tab -> Restore) or the doc's section 5.
 

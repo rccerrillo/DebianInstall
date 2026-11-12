@@ -147,7 +147,15 @@ wait_net
 # =============================================================================
 info "Step 1: Updating the system"
 retry sudo apt-get update
-retry "${APT[@]}" full-upgrade
+retry "${APT[@]}" upgrade --with-new-pkgs
+# full-upgrade only if it removes nothing (sid transitions can propose removals)
+if sudo apt-get -s full-upgrade | grep -q '^Remv'; then
+  warn "sid is mid-transition; holding back these (full-upgrade would remove them):"
+  sudo apt-get -s full-upgrade | awk '/^Remv/ {print "      " $2}'
+  warn "Run 'sudo apt full-upgrade' by hand in a few days, once sid settles."
+else
+  retry "${APT[@]}" full-upgrade
+fi
 apt_install curl ca-certificates gnupg git make gawk inotify-tools \
             pciutils usbutils lsb-release
 ok "System up to date"
